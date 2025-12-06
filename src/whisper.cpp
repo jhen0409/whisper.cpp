@@ -191,7 +191,8 @@ static bool ggml_graph_compute_helper(
       ggml_backend_sched_t   sched,
         struct ggml_cgraph * graph,
                        int   n_threads,
-                      bool   sched_reset = true) {
+                      bool   sched_reset = true,
+         ggml_threadpool_t   threadpool = nullptr) {
     for (int i = 0; i < ggml_backend_sched_get_n_backends(sched); ++i) {
         ggml_backend_t backend = ggml_backend_sched_get_backend(sched, i);
         ggml_backend_dev_t dev = ggml_backend_get_device(backend);
@@ -200,6 +201,14 @@ static bool ggml_graph_compute_helper(
         auto * fn_set_n_threads = (ggml_backend_set_n_threads_t) ggml_backend_reg_get_proc_address(reg, "ggml_backend_set_n_threads");
         if (fn_set_n_threads) {
             fn_set_n_threads(backend, n_threads);
+        }
+
+        // set threadpool if provided (for CPU backend)
+        if (threadpool && ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_CPU) {
+            auto * fn_set_threadpool = (decltype(ggml_backend_cpu_set_threadpool) *) ggml_backend_reg_get_proc_address(reg, "ggml_backend_cpu_set_threadpool");
+            if (fn_set_threadpool) {
+                fn_set_threadpool(backend, threadpool);
+            }
         }
     }
 
@@ -932,6 +941,10 @@ struct whisper_state {
     bool has_vad_segments = false;
 
     std::vector<vad_time_mapping> vad_mapping_table;
+
+    // threadpool for CPU backend
+    ggml_threadpool_t threadpool       = nullptr;
+    ggml_threadpool_t threadpool_batch = nullptr;
 };
 
 struct whisper_context {
@@ -2403,7 +2416,7 @@ static bool whisper_encode_internal(
         }
 
         if (!whisper_encode_external(wstate)) {
-            if (!ggml_graph_compute_helper(sched, gf, n_threads)) {
+            if (!ggml_graph_compute_helper(sched, gf, n_threads, true, wstate.threadpool)) {
                 return false;
             }
         } else {
@@ -2428,7 +2441,7 @@ static bool whisper_encode_internal(
             return false;
         }
 
-        if (!ggml_graph_compute_helper(sched, gf, n_threads)) {
+        if (!ggml_graph_compute_helper(sched, gf, n_threads, true, wstate.threadpool)) {
             return false;
         }
     }
@@ -2444,7 +2457,7 @@ static bool whisper_encode_internal(
             return false;
         }
 
-        if (!ggml_graph_compute_helper(sched, gf, n_threads)) {
+        if (!ggml_graph_compute_helper(sched, gf, n_threads, true, wstate.threadpool)) {
             return false;
         }
     }
@@ -2941,7 +2954,7 @@ static bool whisper_decode_internal(
 
         logits = ggml_graph_node(gf, -1);
 
-        if (!ggml_graph_compute_helper(sched, gf, n_threads)) {
+        if (!ggml_graph_compute_helper(sched, gf, n_threads, true, wstate.threadpool)) {
             return false;
         }
     }
@@ -3869,6 +3882,23 @@ void whisper_free_context_params(struct whisper_context_params * params) {
 void whisper_free_params(struct whisper_full_params * params) {
     if (params) {
         delete params;
+    }
+}
+
+void whisper_attach_threadpool(
+        struct whisper_context * ctx,
+        ggml_threadpool_t        threadpool,
+        ggml_threadpool_t        threadpool_batch) {
+    if (ctx && ctx->state) {
+        ctx->state->threadpool       = threadpool;
+        ctx->state->threadpool_batch = threadpool_batch ? threadpool_batch : threadpool;
+    }
+}
+
+void whisper_detach_threadpool(struct whisper_context * ctx) {
+    if (ctx && ctx->state) {
+        ctx->state->threadpool       = nullptr;
+        ctx->state->threadpool_batch = nullptr;
     }
 }
 

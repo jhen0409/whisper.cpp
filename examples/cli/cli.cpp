@@ -4,6 +4,10 @@
 #include "whisper.h"
 #include "grammar-parser.h"
 
+#include "ggml.h"
+#include "ggml-backend.h"
+#include "ggml-cpu.h"
+
 #include <cmath>
 #include <algorithm>
 #include <fstream>
@@ -1038,6 +1042,36 @@ int main(int argc, char ** argv) {
     // initialize openvino encoder. this has no effect on whisper.cpp builds that don't have OpenVINO configured
     whisper_ctx_init_openvino_encoder(ctx, nullptr, params.openvino_encode_device.c_str(), nullptr);
 
+    // initialize threadpool
+    struct ggml_threadpool * threadpool = nullptr;
+    struct ggml_threadpool * threadpool_batch = nullptr;
+
+    {
+        auto * cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+        if (cpu_dev) {
+            auto * reg = ggml_backend_dev_backend_reg(cpu_dev);
+            auto * ggml_threadpool_new_fn = (decltype(ggml_threadpool_new) *) ggml_backend_reg_get_proc_address(reg, "ggml_threadpool_new");
+
+            if (ggml_threadpool_new_fn) {
+                struct ggml_threadpool_params tpp = ggml_threadpool_params_default(params.n_threads);
+
+                if (!params.no_prints) {
+                    fprintf(stderr, "%s: threadpool init, n_threads = %d\n", __func__, params.n_threads);
+                }
+
+                threadpool = ggml_threadpool_new_fn(&tpp);
+                if (!threadpool) {
+                    fprintf(stderr, "%s: threadpool create failed, n_threads = %d\n", __func__, params.n_threads);
+                }
+
+                // attach threadpool to whisper context
+                if (threadpool) {
+                    whisper_attach_threadpool(ctx, threadpool, threadpool_batch);
+                }
+            }
+        }
+    }
+
     if (!params.grammar.empty()) {
         auto & grammar = params.grammar_parsed;
         if (is_file_exist(params.grammar.c_str())) {
@@ -1301,6 +1335,28 @@ int main(int argc, char ** argv) {
         whisper_print_timings(ctx);
     }
     whisper_free(ctx);
+
+    // free threadpool
+    if (threadpool) {
+        auto * cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+        if (cpu_dev) {
+            auto * reg = ggml_backend_dev_backend_reg(cpu_dev);
+            auto * ggml_threadpool_free_fn = (decltype(ggml_threadpool_free) *) ggml_backend_reg_get_proc_address(reg, "ggml_threadpool_free");
+            if (ggml_threadpool_free_fn) {
+                ggml_threadpool_free_fn(threadpool);
+            }
+        }
+    }
+    if (threadpool_batch) {
+        auto * cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+        if (cpu_dev) {
+            auto * reg = ggml_backend_dev_backend_reg(cpu_dev);
+            auto * ggml_threadpool_free_fn = (decltype(ggml_threadpool_free) *) ggml_backend_reg_get_proc_address(reg, "ggml_threadpool_free");
+            if (ggml_threadpool_free_fn) {
+                ggml_threadpool_free_fn(threadpool_batch);
+            }
+        }
+    }
 
     return 0;
 }
