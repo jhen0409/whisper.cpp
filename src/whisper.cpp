@@ -2419,6 +2419,15 @@ static bool whisper_encode_internal(
             if (!ggml_graph_compute_helper(sched, gf, n_threads, true, wstate.threadpool)) {
                 return false;
             }
+            // Debug: check conv output
+            if (wstate.embd_conv) {
+                std::vector<float> data(std::min((size_t)100, (size_t)ggml_nelements(wstate.embd_conv)));
+                ggml_backend_tensor_get(wstate.embd_conv, data.data(), 0, data.size() * sizeof(float));
+                int n_nan = 0;
+                for (size_t i = 0; i < data.size(); i++) if (std::isnan(data[i])) n_nan++;
+                WHISPER_LOG_WARN("%s: CONV output: checked %zu, nan=%d, vals: %.4f %.4f %.4f %.4f\n",
+                    __func__, data.size(), n_nan, data[0], data[1], data[2], data[3]);
+            }
         } else {
             ggml_backend_sched_reset(sched);
 
@@ -2444,6 +2453,15 @@ static bool whisper_encode_internal(
         if (!ggml_graph_compute_helper(sched, gf, n_threads, true, wstate.threadpool)) {
             return false;
         }
+        // Debug: check encoder output (before cross)
+        if (wstate.embd_enc) {
+            std::vector<float> data(std::min((size_t)100, (size_t)ggml_nelements(wstate.embd_enc)));
+            ggml_backend_tensor_get(wstate.embd_enc, data.data(), 0, data.size() * sizeof(float));
+            int n_nan = 0;
+            for (size_t i = 0; i < data.size(); i++) if (std::isnan(data[i])) n_nan++;
+            WHISPER_LOG_WARN("%s: ENCODER output: checked %zu, nan=%d, vals: %.4f %.4f %.4f %.4f\n",
+                __func__, data.size(), n_nan, data[0], data[1], data[2], data[3]);
+        }
     }
 
     // cross
@@ -2464,6 +2482,29 @@ static bool whisper_encode_internal(
 
     wstate.t_encode_us += ggml_time_us() - t_start_us;
     wstate.n_encode++;
+
+    // Debug: check encoder output for NaN/inf values
+    if (wstate.embd_enc && wstate.embd_enc->data) {
+        std::vector<float> embd_data(ggml_nelements(wstate.embd_enc));
+        ggml_backend_tensor_get(wstate.embd_enc, embd_data.data(), 0, ggml_nbytes(wstate.embd_enc));
+
+        int n_nan = 0, n_inf = 0, n_zero = 0;
+        float min_val = FLT_MAX, max_val = -FLT_MAX, sum = 0.0f;
+        for (size_t i = 0; i < embd_data.size(); i++) {
+            float v = embd_data[i];
+            if (std::isnan(v)) n_nan++;
+            else if (std::isinf(v)) n_inf++;
+            else {
+                if (v == 0.0f) n_zero++;
+                if (v < min_val) min_val = v;
+                if (v > max_val) max_val = v;
+                sum += v;
+            }
+        }
+        float mean = sum / (embd_data.size() - n_nan - n_inf);
+        WHISPER_LOG_WARN("%s: embd_enc stats: n=%zu nan=%d inf=%d zero=%d min=%.4f max=%.4f mean=%.4f\n",
+                         __func__, embd_data.size(), n_nan, n_inf, n_zero, min_val, max_val, mean);
+    }
 
     return !(abort_callback && abort_callback(abort_callback_data));
 }

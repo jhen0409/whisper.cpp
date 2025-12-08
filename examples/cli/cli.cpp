@@ -1007,7 +1007,8 @@ int main(int argc, char ** argv) {
     struct whisper_context_params cparams = whisper_context_default_params();
 
     cparams.use_gpu    = params.use_gpu;
-    cparams.flash_attn = params.flash_attn;
+    cparams.gpu_device = 1;
+    cparams.flash_attn = true;
 
     if (!params.dtw.empty()) {
         cparams.dtw_token_timestamps = true;
